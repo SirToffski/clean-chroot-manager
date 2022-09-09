@@ -7,7 +7,7 @@ CHROOTPATH64="/scratch/.buildroot"
 
 # Number of threads makepkg in the clean chroot will use when building.
 # The typical rule is physical cores + 1.
-THREADS=9
+THREADS=8
 
 # Optionally uncomment and define a custom pacman.conf and/or a custom
 # makepkg.conf for the buildroot using a fully qualified path below.
@@ -15,16 +15,19 @@ THREADS=9
 
 #CUSTOM_PACMAN_CONF='/usr/share/devtools/pacman-extra.conf'
 #CUSTOM_MAKEPKG_CONF='/usr/share/devtools/makepkg-x86_64.conf'
-
 # Optionally uncomment and define a custom location and name for the local chroot
 # package repo.
 #REPO="/home/foo/localrepo"
 #REPO_NAME='chroot_local'
+#USE#LLVM_REPO=1
+USELLVM=1
+#USERUSTAUR=1
+#PYTHON_PKG=1
 
 # Optionally uncomment to pass the --nocheck flag to the build which will skip
 # the check function in the PKGBUILD is it is present.
-#NOCHECK=1
-
+NOCHECK=1
+SKIPPGP=1
 # Optionally define the format of compression for compiled packages. Leave this
 # undefined to use the Arch default.
 PKGEXT=
@@ -44,7 +47,7 @@ RUNNAMCAP=
 #
 # For more on distcc, see: https://wiki.archlinux.org/index.php/Distcc
 RUNDISTCC=
-
+#BUILD32BIT=
 # This is only needed for users planning to build with distcc. Take care to
 # include the localhost plus all volunteers you define below. As a rule of thumb,
 # set to about twice the total number of available server CPUs. See the distcc
