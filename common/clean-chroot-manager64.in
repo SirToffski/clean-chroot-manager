@@ -5,7 +5,7 @@
 
 # shellcheck disable=1090
 
-VERS='2.222'
+VERS='2.233'
 PKG='clean-chroot-manager'
 SKEL="/usr/share/$PKG/ccm.skel"
 
@@ -88,9 +88,9 @@ check_config() {
     # parse config file for correctness
     if [[ ! -d "$CHROOTPATH64" ]]; then
       mkdir -p "$CHROOTPATH64" || {
-      local mesg="Invalid CHROOTPATH64 defined in $CFGFILE"
-      echo -e "${RED}==> ERROR:${ALL_OFF}${BOLD} ${mesg}${ALL_OFF}"; exit 1
-    }
+        local mesg="Invalid CHROOTPATH64 defined in $CFGFILE"
+              echo -e "${RED}==> ERROR:${ALL_OFF}${BOLD} ${mesg}${ALL_OFF}"; exit 1
+            }
     fi
 
     if ! [[ "$THREADS" =~ ^[0-9]+$ ]]; then
@@ -143,6 +143,12 @@ check_config() {
   if [[ -n "$REPO" ]]; then
     REPO="${REPO%/}"
     # check for external path
+    if [[ ! -d "$REPO" ]]; then
+      # make the empty dir for the repo in root's copy of the buildroot
+      # note that we still have to modify pacman.conf to add a line for the repo
+      # but only after it is populated with packages which is in the indexit function
+      [[ -d "$REPO" ]] || mkdir "$REPO"
+    fi
     if sudo -u "$USER" -H sh -c "[ ! -w \"$REPO\" ]"; then
       local mesg="User $USER has no write permissions on $REPO"
       echo -e "${RED}==> ERROR:${ALL_OFF}${BOLD} ${mesg}${ALL_OFF}"; exit 1
@@ -154,6 +160,17 @@ check_config() {
 
   if [[ -z "$REPO_NAME" ]]; then
     REPO_NAME="chroot_local"
+  fi
+
+  if [[ -z "$BUILDLOG" ]]; then
+    BUILDLOG="$HOMEDIR"/ccm-build.log
+  elif [[ ! -w "$BUILDLOG" ]]; then
+    local mesg="User $USER has no write permissions to BUILDLOG $BUILDLOG"
+    echo -e "${RED}==> ERROR:${ALL_OFF}${BOLD} ${mesg}${ALL_OFF}"; exit 1
+  fi
+
+  if [[ ! -f "$BUILDLOG" ]]; then
+    su -c "echo -e 'Date\tPackage\tTime' > $BUILDLOG" "$USER"
   fi
 }
 
@@ -183,11 +200,31 @@ create() {
     pkgs+=('distcc')
   fi
 
+#  if [[ -n "$USELLVM_LH" ]]; then
+#    pkgs+=('llvm-git' 'llvm-libs-git' 'lld-git' 'lldb-git' 'clang-git' 'compiler-rt-git'  'spirv-llvm-translator-git' 'polly-git' 'llvm-ocaml-git'  'git' 'wget')
+#  fi
+
   if [[ -n "$USELLVM" ]]; then
     pkgs+=('llvm-git' 'llvm-libs-git' 'git' 'wget')
   fi
 
-  if [[ -n "$USERUSTAUR" ]]; then
+  if [[ -n "$USELIBCLC" ]]; then
+    pkgs+=('libclc-git')
+  fi
+
+  if [[ -n "$USELIBCC" ]]; then
+    pkgs+=('libc++-git' 'libc++abi-git')
+  fi
+
+  if [[ -n "$USEOPENMP" ]]; then
+    pkgs+=('openmp-git')
+  fi
+
+  if [[ -n "$USERUSTUPGIT" ]]; then
+    pkgs+=('rustup-git')
+  fi
+
+  if [[ -n "$USERUSTNIGHTLYBIN" ]]; then
     pkgs+=('rust-nightly-bin')
   fi
 
@@ -195,13 +232,16 @@ create() {
     pkgs+=('python-pip' 'python-wheel')
   fi
 
-
   if [[ -n "$USELLVM_REPO" ]]; then
-    pkgs+=('llvm' 'llvm-libs' 'clang' 'lld' 'compiler-rt' 'lldb' 'polly')
+    pkgs+=('llvm' 'llvm-libs' 'clang' 'lld' 'compiler-rt' 'lldb' 'polly' 'libclc' 'libc++' 'openmp')
   fi
 
   if [[ -n "$USE_MOLD" ]]; then
     pkgs+=('mold-git')
+  fi
+
+  if [[ -n "$XTRA_PKGS" ]]; then
+    pkgs+=("${XTRA_PKGS[@]}")
   fi
 
 
@@ -211,14 +251,25 @@ create() {
 #    pkgs+=('lib32-libglvnd')
 #  fi
   [[ -d "$CCACHE_DIR" ]] && pkgs+=('ccache')
-  [[ -f "$CUSTOM_PACMAN_CONF" ]] && insargs+=(-C "$CUSTOM_PACMAN_CONF")
+
+  if [[ -f "$CUSTOM_PACMAN_CONF" ]]; then
+    insargs+=(-C "$CUSTOM_PACMAN_CONF")
+  else
+    # with pacman 7.0.0 having a setting of 'DownloadUser = alpm' in /etc/pacman.conf
+    # will cause the creation of the chroot to break so this is a hacky fix
+    if [[ -f /etc/pacman.conf ]]; then
+      sed '/DownloadUser = alpm/d' </etc/pacman.conf >/tmp/ccm-temp-pac.conf
+      insargs+=(-C /tmp/ccm-temp-pac.conf)
+    fi
+  fi
+
   if [[ -f "$CUSTOM_MAKEPKG_CONF" ]]; then
     insargs+=(-M "$CUSTOM_MAKEPKG_CONF")
   else
     # there can be disconnects in variables between makepkg.conf provided by the pacman
     # package and the one provided by the devtools package so in order to maintain
     # consistent behavior of scripts like extra-x86_64-build and others listed on the wiki
-    # under the "Convenience way" section (link below), we use the devtools 
+    # under the "Convenience way" section (link below), we use the devtools
     # makepkg-x86_64.conf rather than the one defined on the live system
     #
     # https://wiki.archlinux.org/title/DeveloperWiki:Building_in_a_clean_chroot#Convenience_way
@@ -243,9 +294,27 @@ create() {
   [[ -n "$PKGEXT" ]] &&
     sed -i -e "s/^PKGEXT.*/PKGEXT=\"$PKGEXT\"/" "$CHROOTPATH64"/root/etc/makepkg.conf
 
-  if ! [[ -f "$CUSTOM_PACMAN_CONF" ]]; then
-    # enable pacman color output in buildroot because I like it
-    sed -i -e '/^#Color/ s,#,,' "$CHROOTPATH64"/root/etc/pacman.conf
+  # Create the internal repo, if it doesn't exist yet
+  if [[ ! -d "$REPO" ]]; then
+    # make the empty dir for the repo in root's copy of the buildroot
+    # note that we still have to modify pacman.conf to add a line for the repo
+    # but only after it is populated with packages which is in the indexit function
+    [[ -d "$REPO" ]] || mkdir "$REPO"
+    chown :alpm -R "$REPO"
+    chown "$USER" "$REPO"
+  fi
+  # pacman 7.0.0 requires alpm gid for local repos
+  if [[ -d "$REPO" ]]; then
+    dir_gid=$(stat -c "%G" "$REPO")
+    if [[ "$dir_gid" == "alpm" ]]; then
+      true
+    else
+      chown :alpm -R "$REPO"
+    fi
+  fi
+  if sudo -u "$USER" -H sh -c "[ ! -w \"$REPO\" ]"; then
+    local mesg="User $USER has no write permissions on $REPO"
+    echo -e "${RED}==> ERROR:${ALL_OFF}${BOLD} ${mesg}${ALL_OFF}"; exit 1
   fi
 
   # if we are using an external repo and if it has a db, add it to pacman.conf if not do nothing
@@ -258,12 +327,6 @@ create() {
                   "$CHROOTPATH64/root/etc/pacman.conf"
       fi
     fi
-  else
-    # make the empty dir for the repo in root's copy of the buildroot
-    # note that we still have to modify pacman.conf to add a line for the repo
-    # but only after it is populated with packages which is in the indexit function
-    [[ -d "$REPO" ]] || mkdir "$REPO"
-    chown "$USER" "$REPO"
   fi
 }
 
@@ -288,16 +351,19 @@ build() {
     # makechrootpkg reads MAKEFLAGS and PACKAGER from the defined makepkg.conf
     # so honor those values here by not prefixing the call to makechrootpkg
     #echo makechrootpkg "${args[@]}" -r "$CHROOTPATH64" -- "${postargs[@]}"
-    #exit
+    start=$(date +%s)
     if ! nice -n 19 makechrootpkg "${args[@]}" -r "$CHROOTPATH64" -- "${postargs[@]}"; then
       exit 1
     fi
+    finish=$(date +%s)
   else
     # not using a custom makepkg.conf which means we're using the one on the live system so
     # we honor the values for MAKEFLAGS and PACKAGER in ~/.config/clean-chroot-manager.conf
+    start=$(date +%s)
     if ! PACKAGER="$PACKAGER" MAKEFLAGS=-j$THREADS nice -n 19 makechrootpkg "${args[@]}" -r "$CHROOTPATH64" -- "${postargs[@]}"; then
       exit 1
     fi
+    finish=$(date +%s)
   fi
 
   # makepkg can can fail to build without throwing an error code so stop if
@@ -339,6 +405,17 @@ indexit() {
   done
   unset GLOBIGNORE
 
+  if [[ -n "$start" ]]; then
+    diff=$(echo "$finish-$start" | bc)
+    if [[ $diff -gt 86400 ]]; then
+      howlong=$(printf '%d days, %02d:%02d:%02d\n' $((diff/86400)) $(((diff%86400)/3600)) $(((diff%3600)/60)) $((diff%60)))
+    else
+      howlong=$(printf '%02d:%02d:%02d\n' $((diff/3600)) $(((diff%3600)/60)) $((diff%60)))
+    fi
+    mesg="Total build time was $howlong"
+    echo -e "${YELLOW}---->${ALL_OFF}${BOLD} ${mesg}${ALL_OFF}"
+  fi
+
   # The rm statement above can return 1 if the file to remove is not found,
   # causing the function to return a non-zero error code even if everything
   # went fine.  If we've made it to this point, the build was run
@@ -366,14 +443,18 @@ list() {
 }
 
 delete() {
-  # remove all files from the repo including packages and databases
-  rm -rf "${REPO:?}"/* 2>/dev/null
-  rm -rf "${REPO:?}"/.* 2>/dev/null
+  mapfile -t packages < <(pacman -Sl chroot_local | awk '{print $2}')
+  mapfile -t files < <(find "$REPO" -name '*.pkg.tar*')
 
-  # modify pacman.conf so we don't error out due to missing databases
-  if [[ -f "$CHROOTPATH64"/root/etc/pacman.conf ]]; then
-    sed -i '/Added by clean/,+4d' "$CHROOTPATH64"/root/etc/pacman.conf
-  fi
+  for i in "${packages[@]}"; do
+    # TODO: make this less hacky
+    # if run multiple times repo-remove will throw errors about missing packages
+    repo-remove -q "$REPO/$REPO_NAME.db.tar.zst" "$i" 2>/dev/null
+  done
+
+  for i in "${files[@]}"; do
+    rm -f "$i"
+  done
 }
 
 testing() {
@@ -585,6 +666,15 @@ distcc_check() {
   fi
 }
 
+logbuild() {
+  source PKGBUILD
+  source /usr/share/makepkg/util/pkgbuild.sh
+
+  local pname=$(extract_global_variable "pkgname" 0 output && echo "$output")
+  local pver=$(get_full_version)
+  echo -e "$(date +%c)\t$pname-$pver\t$howlong" >> "$BUILDLOG"
+}
+
 case "$1" in
   a)
     check_config && addit && indexit
@@ -634,7 +724,7 @@ case "$1" in
       echo -e "${RED}==> ERROR:${ALL_OFF}${BOLD} ${mesg}${ALL_OFF}"; exit 1
     fi
 
-    postargs+=('-R')
+    postargs+=('-Rf')
     mesg="Attempting to repackage..."
     echo -e "${YELLOW}---->${ALL_OFF}${BOLD} ${mesg}${ALL_OFF}"
     # flag to NOT add a '-c' to the args array
@@ -655,7 +745,7 @@ case "$1" in
 
     # flag to add '-c' to the args array
     CLEANIT=1
-    build && indexit
+    build && indexit && logbuild
     ;;
   S)
     check_config && check_active && distcc_check
@@ -670,7 +760,7 @@ case "$1" in
 
     # flag to NOT add a '-c' to the args array
     CLEANIT=0
-    build && indexit
+    build && indexit && logbuild
     ;;
   u)
     check_config && check_active && check_buildroot && update
@@ -693,7 +783,7 @@ case "$1" in
       echo
     fi
     echo -e "${BOLD} --- BUILDING ---${ALL_OFF}"
-    echo -e "${BOLD}   R) Repackage (passes '-R' to default)${ALL_OFF}"
+    echo -e "${BOLD}   R) Repackage (passes '-Rf' to default)${ALL_OFF}"
     echo -e "${BOLD}   S) Run makepkg but do not clean first${ALL_OFF}"
     echo -e "${BOLD}   s) Run makepkg (default)${ALL_OFF}"
     echo
